@@ -13,6 +13,10 @@ const {
   getOrder,
   addProduct,
   approveOrder,
+  createPaypalOrder,
+  capturePaypalOrder,
+  removeFromCart,
+  removeFromCartByUserIdAndProductId,
 } = require("../controller/user/userCtrl");
 const authMiddleware = require("../middleware/authMiddleware");
 const expressAsyncHandler = require("express-async-handler");
@@ -43,6 +47,18 @@ userRoute.get("/getorder", authMiddleware, getOrder);
 userRoute.post("/postproduct", authMiddleware, addProduct);
 
 userRoute.post("/approveorder", authMiddleware, approveOrder);
+
+userRoute.post("/create-order", createPaypalOrder);
+
+userRoute.post("/capture-order", capturePaypalOrder);
+
+userRoute.post("/removefromcart", authMiddleware, removeFromCart);
+
+userRoute.delete(
+  "/deletefromcart",
+  authMiddleware,
+  removeFromCartByUserIdAndProductId
+);
 
 userRoute.get(
   "/verify-jwt",

@@ -2,10 +2,23 @@ const { pool } = require("../../dbConnect");
 const bcrypt = require("bcryptjs");
 const expressAsyncHandler = require("express-async-handler");
 const { generateToken } = require("../../token/generateToken");
+const paypal = require("@paypal/checkout-server-sdk");
 
-// ------------------------------------
-// ---------Register user--------------
-// ------------------------------------
+// -------------------------------------------------------------
+// --------------------Paypal credential------------------------
+// -------------------------------------------------------------
+
+const clientId =
+  "AeL6XnXTewvhfzCkjOgDw6ONCsg9Y3TsHJgAxgajjfRjDJ0THoTJ23CDR-qjj3ryuy6_GgQPHK2kjPtE";
+const clientSecret =
+  "ELoXitXtMmxCaX5jz7pzE3MBYyZnoVENIW-5piB8TDkmrgYKkA34BiZCKTKe8XFXNNEtKkmP7NtA6j_B";
+
+const environment = new paypal.core.SandboxEnvironment(clientId, clientSecret);
+const client = new paypal.core.PayPalHttpClient(environment);
+
+// --------------------------------------------------------------
+// ---------Register user----------------------------------------
+// --------------------------------------------------------------
 
 const registerUser = expressAsyncHandler(async (req, res) => {
   const { fullname, emailid, password } = req?.body;
@@ -38,36 +51,43 @@ const registerUser = expressAsyncHandler(async (req, res) => {
 const userLogin = expressAsyncHandler((req, res) => {
   const { email, password } = req?.body;
 
-  let user;
-  try {
-    pool.query(
-      "SELECT * FROM `users` WHERE email =?",
-      [email],
-      (err, result) => {
+  // Using pool.query with a callback for the database query
+  pool.query(
+    "SELECT * FROM `users` WHERE email = ?",
+    [email],
+    (err, result) => {
+      try {
         if (err) {
-          throw new Error(err, "Invalid Credentials");
+          throw new Error("Server error");
         }
-        user = result;
-        const matchPassword = bcrypt.compareSync(password, user[0]?.password);
+
+        if (result.length === 0) {
+          throw new Error("Invalid Credentials");
+        }
+
+        const user = result[0];
+
+        const matchPassword = bcrypt.compareSync(password, user?.password);
         if (!matchPassword) {
-          throw new Error("password Invalid");
+          throw new Error("Invalid Password");
         }
+
         res.json({
-          fullname: user[0]?.fullname,
-          email: user[0]?.email,
-          mobile_no: user[0]?.mobile_no,
-          isAdmin: user[0]?.is_admin,
-          token: generateToken(user[0]?.user_id),
+          fullname: user?.fullname,
+          email: user?.email,
+          mobile_no: user?.mobile_no,
+          isAdmin: user?.is_admin,
+          token: generateToken(user?.user_id),
+        });
+      } catch (error) {
+        console.error("Error:", error.message);
+        res.status(401).json({
+          message: "Authentication failed",
+          error: error.message,
         });
       }
-    );
-  } catch (error) {
-    console.error("sent error", error);
-    res.status(500).json({
-      error,
-      message: "Server error",
-    });
-  }
+    }
+  );
 });
 
 // -----------------------------------------------------------
@@ -110,6 +130,88 @@ const addToCart = expressAsyncHandler(async (req, res) => {
   }
 });
 
+// ------------------------------------------------------------
+// ----------------------Remove from cart----------------------
+// ------------------------------------------------------------
+
+const removeFromCart = expressAsyncHandler(async (req, res) => {
+  const { product_id } = req.body;
+  const { id } = req.user;
+
+  try {
+    // Check if the product is in the cart
+    const checkExistingQuery =
+      "SELECT * FROM cart WHERE product_id = ? AND user_id = ?";
+
+    pool.query(
+      checkExistingQuery,
+      [product_id, id],
+      (checkError, existingResult) => {
+        if (checkError) {
+          console.error("Error checking existing product in cart:", checkError);
+          res.status(500).json({
+            error: checkError,
+            message: "Internal server error",
+          });
+          return;
+        }
+
+        if (existingResult.length > 0) {
+          const currentQty = existingResult[0].qty;
+
+          if (currentQty > 1) {
+            // If quantity is more than 1, decrease the quantity by 1
+            const updateQuery =
+              "UPDATE cart SET qty = qty - 1, price = price - ? WHERE product_id = ? AND user_id = ?";
+            const priceOfOneItem = existingResult[0].price / currentQty;
+            pool.query(
+              updateQuery,
+              [priceOfOneItem, product_id, id],
+              (updateError) => {
+                if (updateError) {
+                  console.error(
+                    "Error updating quantity in cart:",
+                    updateError
+                  );
+                  res.status(500).json({
+                    error: updateError,
+                    message: "Internal server error",
+                  });
+                } else {
+                  res.status(200).json({ message: "Quantity updated in cart" });
+                }
+              }
+            );
+          } else {
+            // If quantity is 1, delete the entire row
+            const deleteQuery =
+              "DELETE FROM cart WHERE product_id = ? AND user_id = ?";
+            pool.query(deleteQuery, [product_id, id], (deleteError) => {
+              if (deleteError) {
+                console.error("Error deleting product from cart:", deleteError);
+                res.status(500).json({
+                  error: deleteError,
+                  message: "Internal server error",
+                });
+              } else {
+                res.status(200).json({ message: "Product removed from cart" });
+              }
+            });
+          }
+        } else {
+          res.status(404).json({ message: "Product not found in cart" });
+        }
+      }
+    );
+  } catch (error) {
+    console.error("Error removing from cart:", error);
+    res.status(500).json({
+      error,
+      message: "Internal server error",
+    });
+  }
+});
+
 function executeQuery(query, values) {
   return new Promise((resolve, reject) => {
     pool.query(query, values, (error, result) => {
@@ -121,6 +223,40 @@ function executeQuery(query, values) {
     });
   });
 }
+
+//------------------------------------------------------------
+//-------------------Delete from cart-------------------------
+//-----------------------------------------------------------
+
+const removeFromCartByUserIdAndProductId = expressAsyncHandler(
+  async (req, res) => {
+    const { product_id } = req.body;
+    const { id } = req.user;
+
+    try {
+      const deleteQuery =
+        "DELETE FROM cart WHERE product_id = ? AND user_id = ?";
+
+      pool.query(deleteQuery, [product_id, id], (error) => {
+        if (error) {
+          console.error("Error deleting product from cart:", error);
+          res.status(500).json({
+            error,
+            message: "Internal server error",
+          });
+        } else {
+          res.status(200).json({ message: "Product removed from cart" });
+        }
+      });
+    } catch (error) {
+      console.error("Error removing from cart:", error);
+      res.status(500).json({
+        error,
+        message: "Internal server error",
+      });
+    }
+  }
+);
 
 // -------------------------------------------------------
 // ---------------------Get all cart for users------------
@@ -505,6 +641,10 @@ const addProduct = expressAsyncHandler((req, res) => {
   );
 });
 
+// ------------------------------------------------------------
+// -------------------Paypal payment integration---------------
+// ------------------------------------------------------------
+
 const approveOrder = expressAsyncHandler(async (req, res) => {
   const { orderId } = req?.body;
 
@@ -525,6 +665,37 @@ const approveOrder = expressAsyncHandler(async (req, res) => {
   }
 });
 
+const createPaypalOrder = expressAsyncHandler(async (req, res) => {
+  const request = new paypal.orders.OrdersCreateRequest();
+  request.requestBody({
+    intent: "CAPTURE",
+    purchase_units: [
+      { amount: { currency_code: "USD", value: req.body.amount } },
+    ],
+  });
+
+  try {
+    const response = await client.execute(request);
+    res.json({ orderId: response.result.id });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+const capturePaypalOrder = expressAsyncHandler(async (req, res) => {
+  const orderId = req.body.orderID;
+  const request = new paypal.orders.OrdersCaptureRequest(orderId);
+
+  try {
+    const response = await client.execute(request);
+    res.json({ status: response.result.status });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 module.exports = {
   registerUser,
   userLogin,
@@ -539,4 +710,8 @@ module.exports = {
   getOrder,
   addProduct,
   approveOrder,
+  createPaypalOrder,
+  capturePaypalOrder,
+  removeFromCart,
+  removeFromCartByUserIdAndProductId,
 };
